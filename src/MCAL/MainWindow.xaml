@@ -73,7 +73,22 @@
                         <TextBlock x:Name="DeviceSummary" Style="{StaticResource SecondaryText}" Margin="0,8,0,0"/>
                         <TextBlock x:Name="DeviceWarning" Style="{StaticResource SecondaryText}" Margin="0,6,0,0" Visibility="Collapsed"
                                    Foreground="{DynamicResource ErrorTextBrush}"
-                                   Text="Voicemeeter ignores Windows channel volume, so the level knobs won't change what you hear on this device. Choose the physical output device to level with the knobs."/>
+                                   Text="Voicemeeter ignores Windows channel volume and its Remote API wasn't found, so the level knobs won't change what you hear on this device."/>
+                        <StackPanel x:Name="VmPanel" Visibility="Collapsed" Margin="0,10,0,0">
+                            <DockPanel>
+                                <ComboBox x:Name="VmBusBox" DockPanel.Dock="Right" Width="76" SelectionChanged="VmBusBox_SelectionChanged"
+                                          ToolTip="The Voicemeeter output bus your speakers are connected to"/>
+                                <TextBlock Text="Voicemeeter bus for speaker levels" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                            </DockPanel>
+                            <DockPanel Margin="0,6,0,0">
+                                <Button x:Name="VmRetryButton" DockPanel.Dock="Right" Content="Retry" Padding="10,2" MinHeight="26"
+                                        Margin="8,0,0,0" Visibility="Collapsed" VerticalAlignment="Top" Click="VmRetry_Click"/>
+                                <TextBlock x:Name="VmStatusText" Style="{StaticResource SecondaryText}"/>
+                            </DockPanel>
+                            <CheckBox x:Name="StartWithWindowsBox" Margin="0,8,0,0" Checked="StartWithWindows_Changed" Unchecked="StartWithWindows_Changed"
+                                      Content="Start with Windows (in the system tray)"
+                                      ToolTip="Voicemeeter levels only apply while MCAL is running. This starts it hidden in the tray when you sign in."/>
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 
@@ -251,7 +266,7 @@
                                         <StackPanel x:Name="TrimRow" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Bottom"
                                                     Margin="0,0,0,5" TextElement.Foreground="{DynamicResource TextSecondaryBrush}">
                                             <controls:TrimKnob x:Name="Knob" Width="26" Height="26" Visibility="Collapsed" Margin="0,0,5,0"
-                                                               Minimum="-40" Maximum="0" Value="{Binding TrimDb, Mode=TwoWay}"
+                                                               Minimum="{Binding TrimMin}" Maximum="{Binding TrimMax}" Value="{Binding TrimDb, Mode=TwoWay}"
                                                                Committed="Knob_Committed"
                                                                ToolTip="Drag up/down or scroll to set this speaker's level (Shift = fine). Double-click for 0 dB."/>
                                             <TextBlock Text="{Binding TrimText}" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center" IsHitTestVisible="False"/>

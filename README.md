@@ -31,8 +31,19 @@ Once installed, MCAL checks for new versions on its own.
 - **Dark** (default), Light, or System theme.
 - **Auto-update** from GitHub Releases.
 
-> Virtual mixers such as Voicemeeter ignore Windows channel volume, so the knobs have no effect on them. MCAL shows a
-> warning when one is selected; level on the physical output device instead.
+## Voicemeeter
+
+Voicemeeter ignores Windows channel volume, so when the output device is a Voicemeeter device, MCAL applies the
+speaker levels **inside Voicemeeter** instead:
+
+- MCAL uses Voicemeeter's bus *output insert* (the same mechanism as VB-Audio's 8x8 Matrix tool) and applies a gain to
+  each channel of the selected bus (A1, A2, …) in real time. The knobs and auto-level work as usual, with a range of
+  −40 to +12 dB.
+- Voicemeeter lets only one program use the output insert at a time. If the 8x8 Matrix is running, close it
+  (Voicemeeter → Other Tools → Shut Down Matrix 8x8); MCAL connects automatically once the insert is free.
+- The levels apply only while MCAL is running. Closing the window keeps it in the system tray, and
+  **Start with Windows** launches it hidden at sign-in. Exit from the tray menu, or run `MCAL.exe --exit`.
+- Gains are saved per bus in `%APPDATA%\MCAL\settings.json` and reapplied when Voicemeeter restarts.
 
 ## Build
 

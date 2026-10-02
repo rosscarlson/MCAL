@@ -11,6 +11,8 @@ using MCAL.Audio;
 using MCAL.Controls;
 using MCAL.Theming;
 using MCAL.Updates;
+using MCAL.Voicemeeter;
+using Microsoft.Win32;
 using MCAL.ViewModels;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -27,13 +29,19 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer trimRefreshTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private readonly DispatcherTimer meterTimer = new() { Interval = TimeSpan.FromMilliseconds(100) };
     private readonly DispatcherTimer resetConfirmTimer = new() { Interval = TimeSpan.FromSeconds(3) };
+    private readonly DispatcherTimer vmWatchdog = new() { Interval = TimeSpan.FromSeconds(2) };
+    private InsertState vmState = InsertState.Off;
+    private string? vmDetail;
+    private bool suppressVmBus;
+    private System.Windows.Forms.NotifyIcon? tray;
+    private bool exiting;
 
     private List<DeviceInfo> devices = new();
     private List<CaptureDeviceInfo> micDevices = new();
     private string? currentLayoutKey;
     private WasapiOut? output;
     private TestSignalProvider? provider;
-    private ChannelVolume? channelVolume;
+    private ILevelControl? channelVolume;
     private MicMeter? mic;
     private readonly double[] micPower = new double[3];
     private DateTime lastClip = DateTime.MinValue;
@@ -87,6 +95,9 @@ public partial class MainWindow : Window
         trimRefreshTimer.Tick += (_, _) => { trimRefreshTimer.Stop(); RefreshTrimsFromSystem(); };
         meterTimer.Tick += MeterTimer_Tick;
         resetConfirmTimer.Tick += (_, _) => { resetConfirmTimer.Stop(); ResetTrimsButton.Content = "Reset levels"; };
+        vmWatchdog.Tick += VmWatchdog_Tick;
+        StartWithWindowsBox.IsChecked = IsStartWithWindows();
+        if (settings.VoicemeeterEnabled) EnsureVoicemeeter();
         deviceService.DevicesChanged += () => Dispatcher.BeginInvoke(() =>
         {
             refreshDebounce.Stop();
@@ -171,8 +182,17 @@ public partial class MainWindow : Window
         DeviceSummary.Text = dev?.Summary ?? "";
         LayoutText.Text = dev == null ? "" : $"{dev.Layout.Name} layout";
         if (dev != null) settings.DeviceId = dev.Id;
-        bool virtualMixer = dev != null && (dev.Name.Contains("Voicemeeter", StringComparison.OrdinalIgnoreCase) || dev.Name.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase));
-        DeviceWarning.Visibility = virtualMixer ? Visibility.Visible : Visibility.Collapsed;
+        bool virtualMixer = IsVoicemeeterDevice(dev);
+        bool haveRemote = VoicemeeterRemote.FindDll() != null;
+        DeviceWarning.Visibility = virtualMixer && !haveRemote ? Visibility.Visible : Visibility.Collapsed;
+        VmPanel.Visibility = virtualMixer && haveRemote ? Visibility.Visible : Visibility.Collapsed;
+        if (virtualMixer && haveRemote && !settings.VoicemeeterEnabled)
+        {
+            settings.VoicemeeterEnabled = true;
+            EnsureVoicemeeter();
+            OpenChannelVolume(dev);
+        }
+        UpdateVmUi();
 
         if (dev?.LayoutKey == currentLayoutKey)
         {
@@ -243,7 +263,9 @@ public partial class MainWindow : Window
         {
             try
             {
-                channelVolume = new ChannelVolume(deviceService.GetDevice(dev.Id), dev.Channels, dev.Layout.Speakers);
+                channelVolume = IsVoicemeeterDevice(dev) && settings.VoicemeeterEnabled && VoicemeeterRemote.FindDll() != null
+                    ? CreateVoicemeeterLevels(dev)
+                    : new ChannelVolume(deviceService.GetDevice(dev.Id), dev.Channels, dev.Layout.Speakers);
                 channelVolume.Changed += ChannelVolume_Changed;
             }
             catch (Exception ex)
@@ -269,6 +291,8 @@ public partial class MainWindow : Window
         {
             s.CanTrim = cv?.CanControl(s.Channel) == true;
             if (!s.CanTrim) continue;
+            s.TrimMin = cv!.MinDb;
+            s.TrimMax = cv.MaxDb;
             try { s.SetTrimFromSystem(cv!.Get(s.Channel)); }
             catch { s.CanTrim = false; }
         }
@@ -310,7 +334,7 @@ public partial class MainWindow : Window
 
         try
         {
-            double top = controllable.Max(s => cv.Get(s.Channel));
+            double top = cv is VoicemeeterLevels ? 0 : controllable.Max(s => cv.Get(s.Channel));
             foreach (var s in controllable) cv.Set(s.Channel, top);
             infoMessage = $"All channels set to {FormatLevel(top)}.";
         }
@@ -853,7 +877,9 @@ public partial class MainWindow : Window
                         if (Math.Abs(dCh) >= 2 && Math.Abs(level[s] - prevLevel[s]) < Math.Abs(dCh) * 0.3)
                             throw new AutoLevelException(
                                 $"Changing {s.Name}'s Windows channel volume by {dCh.ToString("+0.0;−0.0", CultureInfo.CurrentCulture)} dB made no measurable difference, " +
-                                "so this device doesn't apply per-channel volume (common with virtual devices). Try leveling on the physical output device.");
+                                (cv is VoicemeeterLevels vl
+                                    ? $"so the speakers aren't on Voicemeeter bus {vl.BusName}. Pick the bus your speakers are connected to under Output device."
+                                    : "so this device doesn't apply per-channel volume (common with virtual devices). Try leveling on the physical output device."));
                     }
                 }
 
@@ -1006,7 +1032,7 @@ public partial class MainWindow : Window
             if (IsPlaying) await StopPlaybackAsync();
             UpdateText.Text = "Installing. The app will restart when it's done.";
             UpdateService.LaunchInstaller(installer); // Windows asks for admin approval here
-            Application.Current.Shutdown();
+            ExitApp();
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == 1223) // user declined the admin prompt
         {
@@ -1227,6 +1253,12 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
+        if (!exiting && settings.VoicemeeterEnabled && vmState == InsertState.Running)
+        {
+            e.Cancel = true;
+            _ = HideToTrayAsync();
+            return;
+        }
         autoCts?.Cancel();
         CleanupOutput();
         StopMic();
@@ -1234,5 +1266,216 @@ public partial class MainWindow : Window
         channelVolume = null;
         settings.Save();
         deviceService.Dispose();
+        vmWatchdog.Stop();
+        VoicemeeterRemote.Shutdown();
+        if (tray != null)
+        {
+            tray.Visible = false;
+            tray.Dispose();
+            tray = null;
+        }
+    }
+
+    // ---------------------------------------------------------------- Voicemeeter
+
+    private static bool IsVoicemeeterDevice(DeviceInfo? dev) =>
+        dev != null && (dev.Name.Contains("Voicemeeter", StringComparison.OrdinalIgnoreCase) || dev.Name.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase));
+
+    private double[] VoicemeeterGains(string bus)
+    {
+        if (!settings.VoicemeeterGains.TryGetValue(bus, out var g) || g.Length != 8)
+            settings.VoicemeeterGains[bus] = g = new double[8];
+        return g;
+    }
+
+    /// <summary>Selected bus, corrected to one that exists in the running Voicemeeter edition.</summary>
+    private (string Name, int Index) CurrentBus()
+    {
+        var names = VoicemeeterRemote.BusNames(VoicemeeterRemote.Kind);
+        if (names.Count == 0) return (settings.VoicemeeterBus, 0);
+        int i = names.ToList().IndexOf(settings.VoicemeeterBus);
+        if (i < 0) { i = 0; settings.VoicemeeterBus = names[0]; }
+        return (names[i], i);
+    }
+
+    private VoicemeeterLevels CreateVoicemeeterLevels(DeviceInfo dev)
+    {
+        var (bus, index) = CurrentBus();
+        using var mm = deviceService.GetDevice(dev.Id);
+        var map = SpeakerChannelMap.Build(mm, dev.Channels, dev.Layout.Speakers, 8);
+        var levels = new VoicemeeterLevels(bus, index, map, VoicemeeterGains(bus));
+        levels.ApplyAll();
+        return levels;
+    }
+
+    /// <summary>Connects to Voicemeeter's bus insert (if not already) and applies the saved gains.</summary>
+    private void EnsureVoicemeeter()
+    {
+        if (!settings.VoicemeeterEnabled) return;
+        if (vmState != InsertState.Running || !VoicemeeterRemote.IsRegistered)
+        {
+            vmState = VoicemeeterRemote.Start(out vmDetail);
+            if (vmState == InsertState.Running)
+            {
+                System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
+                ApplyVoicemeeterGains();
+            }
+        }
+        vmWatchdog.Start();
+        EnsureTray();
+        UpdateVmUi();
+    }
+
+    private void ApplyVoicemeeterGains()
+    {
+        VoicemeeterRemote.ResetAllGains();
+        var (bus, index) = CurrentBus();
+        var gains = VoicemeeterGains(bus);
+        for (int c = 0; c < 8; c++) VoicemeeterRemote.SetGain(index * 8 + c, gains[c]);
+    }
+
+    private void VmWatchdog_Tick(object? sender, EventArgs e)
+    {
+        if (VoicemeeterRemote.TakeChangeRequest()) VoicemeeterRemote.RestartStream();
+
+        var before = vmState;
+        if (vmState == InsertState.Running && !VoicemeeterRemote.IsStreaming)
+        {
+            // Voicemeeter was closed or restarted: release and reconnect when it's back
+            VoicemeeterRemote.Unregister();
+            vmState = InsertState.NotRunning;
+        }
+        if (vmState != InsertState.Running)
+        {
+            vmState = VoicemeeterRemote.Start(out vmDetail);
+            if (vmState == InsertState.Running) ApplyVoicemeeterGains();
+        }
+        if (vmState != before)
+        {
+            UpdateVmUi();
+            if (vmState == InsertState.Running && SelectedDevice is { } dev && IsVoicemeeterDevice(dev)) OpenChannelVolume(dev);
+        }
+    }
+
+    private void UpdateVmUi()
+    {
+        if (VmPanel == null || VmPanel.Visibility != Visibility.Visible) return;
+
+        var names = VoicemeeterRemote.BusNames(VoicemeeterRemote.Kind);
+        suppressVmBus = true;
+        VmBusBox.ItemsSource = names.Count > 0 ? names : [settings.VoicemeeterBus];
+        VmBusBox.SelectedItem = CurrentBus().Name;
+        suppressVmBus = false;
+
+        VmRetryButton.Visibility = vmState is InsertState.Busy or InsertState.Error or InsertState.NotRunning ? Visibility.Visible : Visibility.Collapsed;
+        VmStatusText.ClearValue(TextBlock.ForegroundProperty);
+        VmStatusText.Text = vmState switch
+        {
+            InsertState.Running => "Active. MCAL sets the speaker levels inside Voicemeeter while it's running, and stays in the system tray when you close the window.",
+            InsertState.Busy => $"Voicemeeter's bus insert is in use by \"{vmDetail}\". If that's the 8x8 Matrix, close it (Voicemeeter → Other Tools → Shut Down Matrix 8x8). MCAL connects automatically once it's free.",
+            InsertState.NotRunning => "Voicemeeter isn't running. MCAL connects automatically when it starts.",
+            InsertState.Error => vmDetail ?? "Couldn't connect to Voicemeeter.",
+            _ => "Not connected.",
+        };
+        if (vmState is InsertState.Busy or InsertState.Error)
+            VmStatusText.SetResourceReference(TextBlock.ForegroundProperty, "ErrorTextBrush");
+    }
+
+    private void VmBusBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (initializing || suppressVmBus || VmBusBox.SelectedItem is not string bus || bus == settings.VoicemeeterBus) return;
+        settings.VoicemeeterBus = bus;
+        ApplyVoicemeeterGains();
+        ClearReference();
+        ClearReadings();
+        OpenChannelVolume(SelectedDevice);
+        settings.Save();
+    }
+
+    private void VmRetry_Click(object sender, RoutedEventArgs e)
+    {
+        vmState = InsertState.Off;
+        EnsureVoicemeeter();
+        if (vmState == InsertState.Running) OpenChannelVolume(SelectedDevice);
+    }
+
+    // ---------------------------------------------------------------- tray / startup
+
+    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    private static bool IsStartWithWindows()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(RunKey);
+        return key?.GetValue("MCAL") != null;
+    }
+
+    private void StartWithWindows_Changed(object sender, RoutedEventArgs e)
+    {
+        if (initializing) return;
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(RunKey);
+            if (StartWithWindowsBox.IsChecked == true) key.SetValue("MCAL", $"\"{Environment.ProcessPath}\" --tray");
+            else key.DeleteValue("MCAL", false);
+        }
+        catch (Exception ex) { ShowError("Couldn't change the startup setting: " + ex.Message); }
+    }
+
+    private void EnsureTray()
+    {
+        if (tray != null) return;
+        var menu = new System.Windows.Forms.ContextMenuStrip();
+        menu.Items.Add("Open Multi Channel Audio Leveler", null, (_, _) => Dispatcher.BeginInvoke(ShowFromTray));
+        menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+        menu.Items.Add("Exit (Voicemeeter levels stop applying)", null, (_, _) => Dispatcher.BeginInvoke(ExitApp));
+        tray = new System.Windows.Forms.NotifyIcon
+        {
+            Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!),
+            Text = "MCAL - Multi Channel Audio Leveler",
+            ContextMenuStrip = menu,
+            Visible = true,
+        };
+        tray.DoubleClick += (_, _) => Dispatcher.BeginInvoke(ShowFromTray);
+    }
+
+    public void ShowFromTray()
+    {
+        Show();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    /// <summary>Started with --tray: stay hidden, just keep the Voicemeeter levels applied.</summary>
+    public void StartInTray()
+    {
+        if (settings.VoicemeeterEnabled) EnsureTray();
+        else Show();
+    }
+
+    /// <summary>Really exit (tray menu, updater, Windows shutdown) instead of hiding to the tray.</summary>
+    public void ExitApp()
+    {
+        exiting = true;
+        Close();
+    }
+
+    public void PrepareForSessionEnd() => exiting = true;
+
+    private async Task HideToTrayAsync()
+    {
+        autoCts?.Cancel();
+        if (IsPlaying) await StopPlaybackAsync();
+        StopMic();
+        settings.Save();
+        Hide();
+        EnsureTray();
+        if (!settings.TrayHintShown && tray != null)
+        {
+            tray.ShowBalloonTip(5000, "MCAL is still running",
+                "Your Voicemeeter speaker levels stay applied while MCAL runs in the tray. Right-click the tray icon to exit.",
+                System.Windows.Forms.ToolTipIcon.Info);
+            settings.TrayHintShown = true;
+            settings.Save();
+        }
     }
 }

@@ -21,7 +21,7 @@ public sealed class SpeakerVm(SpeakerDef def) : INotifyPropertyChanged
     public double Left => Def.X * SpeakerLayout.CanvasWidth - SpeakerLayout.TileWidth / 2;
     public double Top => Def.Y * SpeakerLayout.CanvasHeight - SpeakerLayout.TileHeight / 2;
     public string ToolTip => CanTrim
-        ? $"{Def.Name} — output channel {Def.Channel + 1}. Windows channel volume {TrimText}."
+        ? $"{Def.Name} — output channel {Def.Channel + 1}. Level {TrimText}."
         : $"{Def.Name} — output channel {Def.Channel + 1}. This device doesn't expose a volume for this channel.";
 
     public bool IsSelected
@@ -57,6 +57,10 @@ public sealed class SpeakerVm(SpeakerDef def) : INotifyPropertyChanged
     }
 
     public string TrimText => CanTrim ? FormatDb(TrimDb) : "—";
+
+    private double trimMin = -40, trimMax = 0;
+    public double TrimMin { get => trimMin; set { if (trimMin != value) { trimMin = value; OnChanged(); } } }
+    public double TrimMax { get => trimMax; set { if (trimMax != value) { trimMax = value; OnChanged(); } } }
 
     /// <summary>Last mic level measured while this speaker played alone, and the signal level it was measured at.</summary>
     public double? MicDb => micDb;

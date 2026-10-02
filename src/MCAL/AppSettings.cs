@@ -16,6 +16,13 @@ public sealed class AppSettings
     public bool LfeLowPass { get; set; } = true;
     public double LfeCutoffHz { get; set; } = TestSignalProvider.DefaultLfeCutoff;
     public bool AutoCheckUpdates { get; set; } = true;
+
+    /// <summary>MCAL applies speaker levels inside Voicemeeter (set once a Voicemeeter device has been used).</summary>
+    public bool VoicemeeterEnabled { get; set; }
+    public string VoicemeeterBus { get; set; } = "A1";
+    /// <summary>dB per bus channel (8 per bus), keyed by bus name.</summary>
+    public Dictionary<string, double[]> VoicemeeterGains { get; set; } = new();
+    public bool TrayHintShown { get; set; }
     public bool CycleEnabled { get; set; }
     public int CycleSeconds { get; set; } = 4;
 
