@@ -20,10 +20,11 @@ public static class UpdateService
     public const string Repo = "MCAL";
     public static string RepoUrl => $"https://github.com/{Owner}/{Repo}";
 
-    private static readonly HttpClient Http = CreateClient();
-
+    // Static initializers run in declaration order: CurrentVersion must come before Http (its User-Agent uses it).
     public static Version CurrentVersion { get; } = ParseVersion(
         Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion) ?? new Version(0, 0, 0);
+
+    private static readonly HttpClient Http = CreateClient();
 
     public static string Display(Version v) => $"{v.Major}.{v.Minor}.{Math.Max(v.Build, 0)}";
 
